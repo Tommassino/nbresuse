@@ -60,13 +60,24 @@ define([
             success: function(data) {
                 let totalMemoryUsage = metric("total_memory_usage", data);
                 let maxMemoryUsage = metric("max_memory_usage", data);
+                let kernelMemoryUsage = metric("kernel_memory_usage", data, true);
+                var currentKernelUsage;
+                kernelMemoryUsage.forEach(function(singleKernelUsage, index){
+                    if (singleKernelUsage[1].indexOf(Jupyter.notebook.kernel.id) > 0){
+                        currentKernelUsage = humanFileSize(parseFloat(singleKernelUsage[2]))
+                    }
+                });
 
                 if (!totalMemoryUsage || !maxMemoryUsage)
                     return;
                 totalMemoryUsage = humanFileSize(parseFloat(totalMemoryUsage[2]));
                 maxMemoryUsage = humanFileSize(parseFloat(maxMemoryUsage[2]));
 
-                var display = totalMemoryUsage + "/" + maxMemoryUsage;
+                var display;
+                if (currentKernelUsage)
+                    display = totalMemoryUsage + "(kernel " + currentKernelUsage + ")/" + maxMemoryUsage;
+                else
+                    display = totalMemoryUsage + "/" + maxMemoryUsage;
                 $('#nbresuse-mem').text(display);
             }
         });
