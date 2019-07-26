@@ -1,37 +1,45 @@
-import os
-import json
 import psutil
-from traitlets import Float, Int, default
-from traitlets.config import Configurable
-from notebook.utils import url_path_join
-from notebook.base.handlers import IPythonHandler
-from tornado import web
+from typing import Callable
+from tornado import gen, ioloop
+from notebook.notebookapp import NotebookApp
 
 
-class MetricsHandler(IPythonHandler):
-    @web.authenticated
-    def get(self):
+from prometheus_client import Gauge
+
+
+TOTAL_MEMORY_USAGE = Gauge(
+    'total_memory_usage',
+    'counter for total memory usage',
+    []
+)
+
+MAX_MEMORY_USAGE = Gauge(
+    'max_memory_usage',
+    'counter for max memory usage',
+    []
+)
+
+
+class MetricsHandler(Callable[[], None]):
+    def __init__(self, nbapp: NotebookApp):
+        self.session_manager = nbapp.session_manager
+
+    @gen.coroutine
+    def __call__(self, *args, **kwargs):
+        self.overall_metrics()
+
+    def overall_metrics(self):
         """
-        Calculate and return current resource usage metrics
+        Calculate and publish the notebook memory metrics
         """
-        config = self.settings['nbresuse_display_config']
         cur_process = psutil.Process()
         all_processes = [cur_process] + cur_process.children(recursive=True)
         rss = sum([p.memory_info().rss for p in all_processes])
 
-        limits = {}
+        TOTAL_MEMORY_USAGE.set(rss)
 
-        if config.mem_limit != 0:
-            limits['memory'] = {
-                'rss': config.mem_limit
-            }
-            if config.mem_warning_threshold != 0:
-                limits['memory']['warn'] = (config.mem_limit - rss) < (config.mem_limit * config.mem_warning_threshold)
-        metrics = {
-            'rss': rss,
-            'limits': limits,
-        }
-        self.write(json.dumps(metrics))
+        virtual_memory = psutil.virtual_memory()
+        MAX_MEMORY_USAGE.set(virtual_memory.total)
 
 
 def _jupyter_server_extension_paths():
@@ -41,6 +49,7 @@ def _jupyter_server_extension_paths():
     return [{
         'module': 'nbresuse',
     }]
+
 
 def _jupyter_nbextension_paths():
     """
@@ -53,47 +62,11 @@ def _jupyter_nbextension_paths():
         "require": "nbresuse/main"
     }]
 
-class ResourceUseDisplay(Configurable):
-    """
-    Holds server-side configuration for nbresuse
-    """
 
-    mem_warning_threshold = Float(
-        0.1,
-        help="""
-        Warn user with flashing lights when memory usage is within this fraction
-        memory limit.
-
-        For example, if memory limit is 128MB, `mem_warning_threshold` is 0.1,
-        we will start warning the user when they use (128 - (128 * 0.1)) MB.
-
-        Set to 0 to disable warning.
-        """,
-        config=True
-    )
-
-    mem_limit = Int(
-        0,
-        config=True,
-        help="""
-        Memory limit to display to the user, in bytes.
-
-        Note that this does not actually limit the user's memory usage!
-
-        Defaults to reading from the `MEM_LIMIT` environment variable. If
-        set to 0, no memory limit is displayed.
-        """
-    )
-
-    @default('mem_limit')
-    def _mem_limit_default(self):
-        return int(os.environ.get('MEM_LIMIT', 0))
-
-def load_jupyter_server_extension(nbapp):
+def load_jupyter_server_extension(nbapp: NotebookApp):
     """
     Called during notebook start
     """
-    resuseconfig = ResourceUseDisplay(parent=nbapp)
-    nbapp.web_app.settings['nbresuse_display_config'] = resuseconfig
-    route_pattern = url_path_join(nbapp.web_app.settings['base_url'], '/metrics')
-    nbapp.web_app.add_handlers('.*', [(route_pattern, MetricsHandler)])
+    callback = ioloop.PeriodicCallback(MetricsHandler(nbapp), 1000)
+    callback.start()
+
